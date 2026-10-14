@@ -1,0 +1,209 @@
+#!/bin/bash
+
+#autor: Henrich Sobotovic
+#login: xsoboth00
+#datum: 29.3.2026
+
+#Ukladam hodnoty filtrov a prikazov
+po_datume=""           #ukladam hodnotu z -a
+pred_datumom=""        #ukladam hodnotu z -b
+ip_filtre=""           #ukladam hodnotu z -ip
+uri_filtre=""          #ukladam hodnotu -uri
+prikaz=""              #ukladam prikaz (list-ip, list-host, ..)
+subor=""               #ukladam nazvy suborov ktore ma skript spracovat
+
+#Spracovanie argumentov
+while [ $# -gt 0 ]; do      #kym je pocet vacsi ako 0
+    case "$1" in
+        -a)
+            #-a potrebuje aby nasledoval za nim datum
+            if [ -z "$2" ]; then
+                #vypiseme chybovu hlasku, presmerujem na stderr, ukoncim skript s n.h. 1
+                echo "Error: -a vyzaduje datum" >&2
+                exit 1
+            fi    
+            if [ -z "$po_datume" ] || [ "$2" > "$po_datume" ]; then
+                po_datume="$2"
+            fi
+            shift 2
+            ;;
+        -b)
+            if [ -z "$2" ]; then
+                echo "Error: -b vyzaduje datum" >&2
+                exit 1
+            fi
+            # ak uz mame pred_datumom a novy je skor, pouzijeme novy
+            if [ -z "$pred_datumom" ] || [ "$2" < "$pred_datumom" ]; then
+                pred_datumom="$2"
+            fi
+            shift 2
+            ;;
+        -ip)
+            if [ -z "$2" ]; then
+                echo "Error: -ip vyzaduje IP adresu" >&2
+                exit 1
+            fi
+            ip_filtre="$ip_filtre $2"
+            shift 2
+            ;;
+        -uri)
+            if [ -z "$2" ]; then
+                echo "Error: -uri vyzaduje vzor" >&2
+                exit 1
+            fi
+            uri_filtre="$uri_filtre $2"
+            shift 2
+            ;;
+        #ak je prvy argument jeden z tychto
+        list-ip|list-hosts|list-uri|hist-ip|hist-load)
+            #kontrolujem ci uz nebol zadany prikaz predtym (moze byt max 1)
+            # -n = non zero length
+            if [ -n "$prikaz" ]; then
+                echo "Error: zadany viac ako jeden prikaz" >&2
+                exit 1
+            fi
+            prikaz="$1"
+            #zahodim len prvy argument 
+            shift
+            ;;
+        #ak argument zacina na "-" ale neni ziaden z tych vyssie tak je to chyba
+        -*)
+            echo "Error: neznama volba '$1'" >&2
+            exit 1
+            ;;
+        #ak nezacina "-", tak je to nazov suboru 
+        *)
+            #stare subory + medzera + novy subor
+            subor="$subor $1"
+            shift
+            ;;
+    esac
+done
+
+#tato funkcia precita vsetky zadane subory a vypise obsah
+citaj_subory() {
+    #ak je premenna prazdna
+    if [ -z "$subor" ]; then
+        #citam z stdin
+        cat
+    else
+        #prejdem kazdy subor 
+        for f in $subor; do
+            #ak neexistuje
+            if [ ! -f "$f" ]; then
+                echo "Error: subor '$f' neexistuje" >&2
+                exit 1
+            fi
+            case "$f" in
+                #ak konci na .gz tak ho dekomprimujem a vypisem na vystup
+                *.gz) gzip -dc "$f" ;;
+                #ak je to klasika tak ho precitam 
+                *)    cat "$f" ;;
+            esac
+        done
+    fi
+}
+
+filtruj() {
+    #zavolam funkciu a vysledok si ulozim 
+    vysledok=$(citaj_subory)
+
+    #ak by nebolo nic v "ip_filtre" tak sa nic nestane cize nemusi tam byt if statement
+    for f in $ip_filtre; do
+        #vezmem "vysledok" a necham len riadky ktore obsahuju hodnotu $f a ulozim do "vysledok"
+        vysledok=$(echo "$vysledok" |grep "$f")  
+    done
+
+    # rovnako pre uri
+    for f in $uri_filtre; do
+        vysledok=$(echo "$vysledok" | grep "$f")
+    done
+
+    #ak bol zadany -a alebo -b alebo oboje
+    if [ -n "$po_datume" ] || [ -n "$pred_datumom" ]; then
+        #poslem vysledok do awk
+        vysledok=$(echo "$vysledok" | awk \
+            -v po_datume="$po_datume" \
+            -v pred_datumom="$pred_datumom" \
+        '{
+            #odstanim $4 od druheho znaku ([) a pomocou splitu rozdelim podla / a : a ulozim do pola
+            split(substr($4, 2), pole, /[\/:]/)
+            
+            #skratky mesiacov si ulozim ako cisla
+            mesiac["Jan"]="01"; mesiac["Feb"]="02"; mesiac["Mar"]="03"
+            mesiac["Apr"]="04"; mesiac["May"]="05"; mesiac["Jun"]="06"
+            mesiac["Jul"]="07"; mesiac["Aug"]="08"; mesiac["Sep"]="09"
+            mesiac["Oct"]="10"; mesiac["Nov"]="11"; mesiac["Dec"]="12"   
+
+            #poskladam do pozadovaneho formatu
+            datum = pole[3] "-" mesiac[pole[2]] "-" pole[1] " " pole[4] ":" pole[5] ":" pole[6]
+
+            #ak je datum rovnaky alebo mensi ako filter "po_datume" tak preskocim
+            if (po_datume  != "" && datum <= po_datume)  next
+
+            #ak je datum vacsi alebo rovnaky ako filter "pred_datumom" tak preskocim 
+            if(pred_datumom != "" && datum >= pred_datumom) next
+
+            #presiel filtrami -> vypisem cely riadok
+            print $0
+        }')
+    fi
+
+    echo "$vysledok"
+}  
+
+case "$prikaz" in
+    list-ip)
+        #zavolam funkciu filtruj, vyberiem len prvy stlpec, zoradim abecedne, odstranim duplicity
+        filtruj | awk '{print $1}'| sort | uniq
+        ;;
+    list-uri)
+        #zavolam, preskocim riadky kde 6. stlpec je "-", vypisem 7. stlpec, ...
+        filtruj | awk '$6 != "\"-\"" {print $7}' | sort | uniq
+        ;;
+    list-hosts)
+        #ziskam unikatne ip adresy a pre kazdu ip adresu vypisem domenove meno
+        filtruj | awk '{print $1}' | sort | uniq | while read ip; do
+            #zistim domenove meno pomocou "host" a chybove hlasky zahodim 
+            vysledok=$(host "$ip" 2>/dev/null)
+            #hladam "domain name pointer" ale nechcem nic vypisovat (-q)
+            if echo "$vysledok" | grep -q "domain name pointer"; then
+                #vypisem posledny stlpec riadku($NF) s domain name pointer
+                echo "$vysledok" | awk '/domain name pointer/ {print $NF}'
+            else
+                #ak sa domenove meno nenaslo tak vypisem cisto IP adresu
+                echo "$ip"
+            fi
+        done
+        ;;
+    hist-ip)
+        #zavolam, vyberiem IP adresy, zoradim, spocitam vyskyty, zoradim od najvacsieho 
+        filtruj |awk '{print $1}' | sort | uniq -c | sort -rn | awk '{
+            pocet = $1      #pocet vyskytov
+            ip = $2         #ip adresa
+            mriezky = ""    #zacinam s prazdnym retazcom  
+            for (i = 0; i < pocet; i++) mriezky = mriezky "#"       #pridam mriezky do retazca
+            printf "%s (%d): %s\n", ip, pocet, mriezky              #vypisem
+        }'
+        ;;
+    hist-load)
+        #1)vyberiem cast riadku podla vzoru
+        #2)prehodim mesiace na cisla
+        #3)rozdelim si datum a cas na skupiny a potom poskladam aby to sedelo zadaniu
+        #4)zoradim, pocitam vyskyty, zoradim to podla 2. a 3. stlpca
+        filtruj | grep -o '[0-9][0-9]/[A-Z][a-z][a-z]/[0-9][0-9][0-9][0-9]:[0-9][0-9]' \
+        | sed 's/Jan/01/; s/Feb/02/; s/Mar/03/; s/Apr/04/; s/May/05/; s/Jun/06/; s/Jul/07/; s/Aug/08/; s/Sep/09/; s/Oct/10/; s/Nov/11/; s/Dec/12/' \
+        | sed 's/\([0-9][0-9]\)\/\([0-9][0-9]\)\/\([0-9][0-9][0-9][0-9]\):\([0-9][0-9]\)/\3-\2-\1 \4:00/' \
+        | sort | uniq -c | sort -k2,3 | awk '{
+            pocet = $1              #pocet requestov
+            datum = $2 " " $3       #datum + medzera + cas
+            mriezky = ""            #prazdny retazec 
+            for (i = 0; i < pocet; i++) mriezky =mriezky "#"       #spocitam
+            printf "%s (%d): %s\n", datum, pocet, mriezky           #vypisem
+        }'
+        ;;
+    #ak neni zadany ziadny prikaz tak len vypise prefiltrovane riadky
+    "")
+        filtruj
+        ;;
+esac
